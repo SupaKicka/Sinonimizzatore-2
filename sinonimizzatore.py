@@ -1098,7 +1098,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     position: relative;
     height: 100%;
     aspect-ratio: 6 / 5;
-    max-width: min(100%, 600px);
+    max-width: 100%;
     overflow: hidden;
   }
   .pergamena-inner img {
@@ -1230,7 +1230,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <div class="col-output">
     <div class="pergamena-frame">
       <div class="pergamena-inner">
-        <img src="/pergamena.png" alt="">
+        <img src="/pergamena.png?v=2" alt="">
         <div class="output-text" id="outputText"></div>
       </div>
     </div>
@@ -1376,7 +1376,7 @@ class SinonimizzatoreHandler(http.server.BaseHTTPRequestHandler):
                 data = f.read()
             self.send_response(200)
             self.send_header("Content-Type", content_type)
-            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(data)
         except FileNotFoundError:
