@@ -1083,40 +1083,37 @@ HTML_PAGE = r"""<!DOCTYPE html>
     align-items: center;
     gap: 4px;
     min-width: 0;
-    overflow: visible;
   }
 
   .pergamena-frame {
-    position: relative;
     flex: 1;
-    min-height: 0;
     display: flex;
     justify-content: center;
-    align-items: flex-start;
+    align-items: center;
+    min-height: 0;
   }
   .pergamena-inner {
     position: relative;
-    height: 100%;
-    aspect-ratio: 348 / 528;
-    max-width: 100%;
     overflow: hidden;
+    /* Altezza fissa in vh: identica su ogni schermo/viewport */
+    height: calc(100vh - 90px);
   }
   .pergamena-inner img {
-    width: 100%;
     height: 100%;
+    width: auto;
     display: block;
-    filter: drop-shadow(0 8px 24px rgba(0,0,0,0.4));
+    filter: drop-shadow(0 6px 18px rgba(0,0,0,0.5));
   }
   .output-text {
     position: absolute;
-    top: 26%;
-    left: 28%;
-    right: 28%;
+    top: 24%;
+    left: 18%;
+    right: 18%;
     bottom: 20%;
     font-family: 'Cormorant Garamond', serif;
     font-style: italic;
     font-size: 15px;
-    line-height: 1.7;
+    line-height: 1.45;
     color: var(--ink);
     text-align: center;
     overflow-y: auto;
@@ -1178,7 +1175,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .col-input { flex: none; width: 100%; }
     .col-output { flex: none; width: 100%; }
     .pergamena-frame { height: auto; }
-    .pergamena-inner { width: 80vw !important; height: auto !important; aspect-ratio: 348 / 528; margin: 0 auto; }
+    .pergamena-inner { height: auto !important; width: 70vw; max-width: 360px; margin: 0 auto; }
     .pergamena-inner img { width: 100% !important; height: auto !important; }
     .input-panel { min-height: 200px; }
     header { flex-wrap: wrap; }
@@ -1230,7 +1227,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <div class="col-output">
     <div class="pergamena-frame">
       <div class="pergamena-inner">
-        <img src="/pergamena.png?v=3" alt="">
+        <img src="/pergamena.png?v=5" alt="">
         <div class="output-text" id="outputText"></div>
       </div>
     </div>
