@@ -1097,7 +1097,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .pergamena-inner {
     position: relative;
     height: 100%;
-    aspect-ratio: 6 / 5;
+    aspect-ratio: 348 / 528;
     max-width: 100%;
     overflow: hidden;
   }
@@ -1178,7 +1178,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     .col-input { flex: none; width: 100%; }
     .col-output { flex: none; width: 100%; }
     .pergamena-frame { height: auto; }
-    .pergamena-inner { width: 90vw !important; height: auto !important; aspect-ratio: 6 / 5; margin: 0 auto; }
+    .pergamena-inner { width: 80vw !important; height: auto !important; aspect-ratio: 348 / 528; margin: 0 auto; }
     .pergamena-inner img { width: 100% !important; height: auto !important; }
     .input-panel { min-height: 200px; }
     header { flex-wrap: wrap; }
@@ -1230,7 +1230,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   <div class="col-output">
     <div class="pergamena-frame">
       <div class="pergamena-inner">
-        <img src="/pergamena.png?v=2" alt="">
+        <img src="/pergamena.png?v=3" alt="">
         <div class="output-text" id="outputText"></div>
       </div>
     </div>
