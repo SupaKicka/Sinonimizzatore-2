@@ -1096,10 +1096,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   .pergamena-inner {
     position: relative;
-    /* Occupa tutta l'altezza disponibile, larghezza segue ratio 900:750 = 6:5 */
     height: 100%;
     aspect-ratio: 6 / 5;
-    max-width: 100%;
+    max-width: min(100%, 600px);
     overflow: hidden;
   }
   .pergamena-inner img {
