@@ -1399,7 +1399,8 @@ def main():
     stats = engine.get_stats()
     print(f"  DB: {stats['lemmas']:,} lemmi | {stats['forms']:,} forme | {stats['synonyms']:,} sinonimi")
 
-    server = http.server.HTTPServer(("127.0.0.1", args.port), SinonimizzatoreHandler)
+    host = os.environ.get("HOST", "127.0.0.1")  # Cloud Run richiede 0.0.0.0
+    server = http.server.HTTPServer((host, args.port), SinonimizzatoreHandler)
     print(f"\n  Apri: http://localhost:{args.port}")
     print("  Premi Ctrl+C per chiudere.\n")
 
