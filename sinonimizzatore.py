@@ -345,6 +345,13 @@ class SinonimizzatoreEngine:
         )
         return tokens
 
+    # Pronomi soggetto: la parola successiva è quasi certamente un verbo
+    # "io mangio", "tu voglia", "lei canta", "noi andiamo"
+    _SUBJECT_PRONOUNS = frozenset({
+        "io", "tu", "lui", "lei", "egli", "ella", "esso", "essa",
+        "noi", "voi", "loro", "essi", "esse",
+    })
+
     # Pronomi clitici che precedono un verbo (mi alzo, si veste, ci arrabbiamo)
     _CLITIC_PRONOUNS = frozenset({
         "mi", "ti", "si", "ci", "vi", "me", "te", "se", "ce", "ve",
@@ -435,7 +442,9 @@ class SinonimizzatoreEngine:
 
         has_noun = any(m["pos"] == "NOUN" for m in matches)
         has_conjugated_verb = any(m["pos"] == "VER" and m.get("person") and m.get("mood") == "ind" for m in matches)
+        has_finite_verb = any(m["pos"] == "VER" and m.get("person") for m in matches)
         has_adj = any(m["pos"] == "ADJ" for m in matches)
+        has_adv = any(m["pos"] == "ADV" for m in matches)
 
         # Analisi contesto successivo
         next_is_determiner = next_word and next_word.lower() in self._DETERMINERS
@@ -469,6 +478,14 @@ class SinonimizzatoreEngine:
         # Regola 2: clitico → VER
         elif prev_is_clitic and has_conjugated_verb:
             pos_priority = {"VER": 0, "NOUN": 1, "ADJ": 2, "ADV": 3}
+        # Regola 2b: pronome soggetto → VER (include congiuntivo/condizionale)
+        # "tu voglia" → VER, "io parto" → VER, "lei canta" → VER
+        elif prev_lw in self._SUBJECT_PRONOUNS and has_finite_verb:
+            pos_priority = {"VER": 0, "NOUN": 1, "ADJ": 2, "ADV": 3}
+        # Regola 2c: "non" → VER — "non" precede sempre un verbo in italiano
+        # "non voglia" → VER, "non parto" → VER, "non canto" → VER
+        elif prev_lw == "non" and has_finite_verb:
+            pos_priority = {"VER": 0, "NOUN": 1, "ADJ": 2, "ADV": 3}
         # Regola 3: ambiguità NOUN/VER con contesto
         elif has_noun and has_conjugated_verb:
             if next_is_determiner:
@@ -494,6 +511,35 @@ class SinonimizzatoreEngine:
                 pos_priority = {"ADJ": 0, "NOUN": 1, "VER": 2, "ADV": 3}
             else:
                 pos_priority = {"NOUN": 0, "VER": 1, "ADJ": 2, "ADV": 3}
+        # Regola ADV/ADJ: dopo un verbo, parole come "spesso/forte/piano/molto"
+        # sono quasi sempre avverbi, non aggettivi.
+        # "vado spesso" → ADV, "sono spesso quelle" → ADV
+        # Ma "muro spesso" → ADJ (prev è NOUN postposto dopo determinante)
+        elif has_adj and has_adv and prev_word:
+            prev_matches_all = self.form_index.get(prev_lw, [])
+            prev_is_noun = any(m["pos"] == "NOUN" for m in prev_matches_all)
+            prev_has_verb = any(m["pos"] == "VER" for m in prev_matches_all)
+            if prev_is_noun and not prev_has_verb:
+                # prev è solo NOUN: "strato spesso" → ADJ postposto
+                pos_priority = {"ADJ": 0, "ADV": 1, "NOUN": 2, "VER": 3}
+            elif not prev_is_noun and prev_has_verb:
+                # prev è solo VER: "vado spesso", "parlo forte" → ADV
+                pos_priority = {"ADV": 0, "ADJ": 1, "NOUN": 2, "VER": 3}
+            elif prev_is_noun and prev_has_verb:
+                # prev è sia NOUN che VER (es. "muro" = murare/muro, "sono" = essere/suono)
+                # Se la parola successiva è un verbo → questa è ADJ postposta a un NOUN
+                # "il muro spesso proteggeva" → next=proteggeva(VER) → spesso=ADJ
+                # "sono spesso quelle" → next=quelle(DET) → spesso=ADV
+                next_has_verb = False
+                if next_word:
+                    nxt = self.form_index.get(next_word.lower(), [])
+                    next_has_verb = any(m["pos"] == "VER" for m in nxt)
+                if next_has_verb and not next_is_determiner:
+                    pos_priority = {"ADJ": 0, "ADV": 1, "NOUN": 2, "VER": 3}
+                else:
+                    pos_priority = {"ADV": 0, "ADJ": 1, "NOUN": 2, "VER": 3}
+            else:
+                pos_priority = {"ADV": 0, "ADJ": 1, "NOUN": 2, "VER": 3}
         else:
             pos_priority = {"NOUN": 0, "VER": 1, "ADJ": 2, "ADV": 3}
 
@@ -1228,6 +1274,29 @@ class SinonimizzatoreEngine:
                     "synonyms": [],
                 })
                 continue
+
+            # Skip articoli e preposizioni articolate quando fungono da determinanti
+            # (cioè quando la parola successiva è un nome o aggettivo).
+            # Es: "dei fiori" → "dei" = ARTPRE (di+i), NON NOUN (plurale di dio).
+            # Ma: "I dei sono potenti" → "dei" è NOUN, next_word è verbo → non skippare.
+            token_lower = token.lower()
+            if token_lower in self.ARTICLE_MAP or token_lower in self.ARTPRE_MAP:
+                next_is_content = False
+                if next_word:
+                    nw_lower = next_word.lower()
+                    nw_matches = self.form_index.get(nw_lower, [])
+                    next_is_content = (
+                        nw_lower in self._DETERMINERS
+                        or any(m["pos"] in ("NOUN", "ADJ") for m in nw_matches)
+                    )
+                if next_is_content:
+                    results.append({
+                        "original": token,
+                        "replacement": token,
+                        "replaced": False,
+                        "synonyms": [],
+                    })
+                    continue
 
             # Skip ausiliari nei tempi composti: "ho mangiato", "è andato",
             # "aveva detto", "avrei voluto", "ha sempre creduto"
