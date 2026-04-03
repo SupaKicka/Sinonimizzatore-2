@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Il Sinonimizzatore</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=IM+Fell+English+SC&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --parchment: #f5e6c8;
+    --parchment-dark: #d4b896;
+    --ink: #2c1810;
+    --ink-light: #5a3e2b;
+    --ink-faded: #8b7355;
+    --gold: #8b6914;
+    --gold-light: #c4a035;
+    --gold-bright: #d4af37;
+    --red-ink: #7a1a1a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    background: #1a1209 url('/sfondo.png') center center / cover fixed;
+    color: var(--ink);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: baseline;
+    justify-content: center;
+    gap: 16px;
+    padding: 8px 28px;
+    border-bottom: 1px solid rgba(139,105,20,0.25);
+    background: rgba(30,20,8,0.35);
+    backdrop-filter: blur(6px);
+  }
+  header h1 {
+    font-family: 'IM Fell English SC', serif;
+    font-size: 20px;
+    color: var(--gold-bright);
+    letter-spacing: 3px;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  }
+  header .sep { color: rgba(139,105,20,0.5); font-size: 14px; }
+  header .subtitle {
+    font-style: italic;
+    font-size: 13px;
+    color: #4a3a25;
+    letter-spacing: 1px;
+  }
+  .db-stats {
+    margin-left: auto;
+    display: flex;
+    gap: 14px;
+    font-size: 11px;
+    color: #4a3a25;
+  }
+  .db-stats strong { color: #3a2a18; }
+
+  /* ── Main layout ── */
+  .main {
+    flex: 1;
+    display: flex;
+    gap: 28px;
+    padding: 18px 28px 14px;
+    overflow: hidden;
+    max-width: 1500px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
+  /* ── Left column: input + controls ── */
+  .col-input {
+    flex: 0 0 560px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .input-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: linear-gradient(160deg, var(--parchment) 0%, #eddcb5 100%);
+    border: 2px solid var(--parchment-dark);
+    border-radius: 5px;
+    box-shadow: 0 6px 28px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.3);
+    overflow: hidden;
+  }
+  .panel-bar {
+    padding: 8px 18px;
+    background: linear-gradient(180deg, rgba(139,105,20,0.14), rgba(139,105,20,0.04));
+    border-bottom: 1px solid var(--parchment-dark);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .panel-bar h2 {
+    font-family: 'IM Fell English SC', serif;
+    font-size: 14px;
+    color: var(--ink-light);
+    letter-spacing: 2px;
+  }
+  .word-count {
+    font-size: 12px;
+    color: var(--ink-faded);
+    font-style: italic;
+  }
+  textarea {
+    flex: 1;
+    width: 100%;
+    min-height: 60px;
+    padding: 16px 20px;
+    background: transparent;
+    border: none;
+    color: var(--ink);
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 18px;
+    line-height: 1.75;
+    resize: none;
+    outline: none;
+  }
+  textarea::placeholder { color: var(--ink-faded); font-style: italic; }
+
+  /* ── Control strip ── */
+  .control-strip {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .btn {
+    padding: 10px 30px;
+    border: 2px solid var(--gold);
+    border-radius: 4px;
+    font-family: 'IM Fell English SC', serif;
+    font-size: 15px;
+    cursor: pointer;
+    transition: all 0.2s;
+    letter-spacing: 1px;
+  }
+  .btn-primary {
+    background: linear-gradient(180deg, #8b6914, #6b4f0e);
+    color: var(--parchment);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    box-shadow: 0 3px 10px rgba(139,105,20,0.3);
+  }
+  .btn-primary:hover {
+    background: linear-gradient(180deg, #a07a1a, #8b6914);
+    box-shadow: 0 4px 18px rgba(212,175,55,0.35);
+    transform: translateY(-1px);
+  }
+  .btn-secondary {
+    background: linear-gradient(180deg, var(--parchment), #e0d0a8);
+    color: var(--ink-light);
+    border-color: var(--parchment-dark);
+    padding: 10px 22px;
+    font-size: 14px;
+  }
+  .btn-secondary:hover {
+    background: linear-gradient(180deg, #f0e0c0, var(--parchment));
+  }
+
+  .slider-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+  }
+  .slider-group label {
+    font-size: 15px;
+    color: var(--ink-light);
+    font-style: italic;
+    white-space: nowrap;
+  }
+  .slider-group input[type=range] {
+    flex: 1;
+    accent-color: var(--gold);
+  }
+  .slider-group .val {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--gold);
+    min-width: 36px;
+    text-align: right;
+  }
+
+  .loading {
+    display: none;
+    align-items: center;
+    gap: 6px;
+    color: var(--gold-light);
+    font-style: italic;
+    font-size: 14px;
+  }
+  .loading.active { display: flex; }
+  .quill { display: inline-block; animation: qw .9s ease-in-out infinite; }
+  @keyframes qw { 0%,100%{transform:rotate(-5deg)} 50%{transform:rotate(12deg) translateX(2px)} }
+
+  /* ── Right column: pergamena ── */
+  .col-output {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .pergamena-frame {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 0;
+  }
+  .pergamena-inner {
+    position: relative;
+    overflow: hidden;
+    /* Altezza fissa in vh: identica su ogni schermo/viewport */
+    height: calc(100vh - 90px);
+  }
+  .pergamena-inner img {
+    height: 100%;
+    width: auto;
+    display: block;
+    filter: drop-shadow(0 6px 18px rgba(0,0,0,0.5));
+  }
+  .output-text {
+    position: absolute;
+    top: 24%;
+    left: 18%;
+    right: 18%;
+    bottom: 20%;
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 15px;
+    line-height: 1.45;
+    color: #1a0e07;
+    text-align: center;
+    overflow-y: auto;
+    padding: 4px 6px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(139,105,20,0.25) transparent;
+    /* Effetto inchiostro sulla pergamena */
+    mix-blend-mode: multiply;
+    text-shadow: 0 0 1px rgba(26,14,7,0.3);
+    -webkit-font-smoothing: antialiased;
+  }
+  .output-text:empty::before {
+    content: "Qui apparir\00e0  il Vostro testo, rielaborato con somma cura\2026";
+    color: var(--ink-faded);
+    mix-blend-mode: multiply;
+  }
+  .output-text:not(:empty) {
+    overflow-y: auto;
+  }
+  .output-text::-webkit-scrollbar { width: 3px; }
+  .output-text::-webkit-scrollbar-thumb { background: rgba(139,105,20,0.25); border-radius: 2px; }
+
+  /* ── Token ── */
+  .token-replaced {
+    color: inherit;
+    font-weight: inherit;
+  }
+
+  /* ── Stats bar under pergamena ── */
+  .stats-row {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+  .stats-row span {
+    font-size: 13px;
+    color: var(--ink-light);
+    font-style: italic;
+  }
+  .stats-row strong { color: var(--ink); }
+  .stat-hl { color: var(--gold) !important; font-weight: 700; }
+
+  .btn-copy {
+    font-family: 'IM Fell English SC', serif;
+    font-size: 12px;
+    padding: 4px 14px;
+    border-radius: 3px;
+    background: linear-gradient(180deg, var(--parchment), #e0d0a8);
+    color: var(--ink-light);
+    border: 1px solid var(--parchment-dark);
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: background 0.2s;
+  }
+  .btn-copy:hover { background: linear-gradient(180deg, #f5edd5, var(--parchment)); }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    body { overflow: auto; height: auto; min-height: 100vh; }
+    .main { flex-direction: column; padding: 12px 16px; gap: 16px; overflow: visible; }
+    .col-input { flex: none; width: 100%; }
+    .col-output { flex: none; width: 100%; }
+    .pergamena-frame { height: auto; }
+    .pergamena-inner { height: auto !important; width: 70vw; max-width: 360px; margin: 0 auto; }
+    .pergamena-inner img { width: 100% !important; height: auto !important; }
+    .input-panel { min-height: 200px; }
+    header { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Il Sinonimizzatore</h1>
+  <span class="sep">&mdash;</span>
+  <span class="subtitle">Macchina per la Rielaborazione delle Parole</span>
+  <div class="db-stats">
+    <span><strong id="dbLemmas">--</strong> lemmi</span>
+    <span><strong id="dbForms">--</strong> forme</span>
+    <span><strong id="dbSynonyms">--</strong> sinonimi</span>
+  </div>
+</header>
+
+<div class="main">
+
+  <!-- INPUT -->
+  <div class="col-input">
+    <div class="input-panel">
+      <div class="panel-bar">
+        <h2>Testo Originale</h2>
+        <span class="word-count" id="inputCount">0 parole</span>
+      </div>
+      <textarea id="inputText" placeholder="Vergare qui il testo che si desidera rielaborare..." spellcheck="false"></textarea>
+    </div>
+
+    <div class="slider-group">
+      <label>Intensit&agrave;</label>
+      <input type="range" id="intensity" min="10" max="100" value="70" step="5">
+      <span class="val" id="intensityVal">70%</span>
+    </div>
+
+    <div class="control-strip">
+      <button class="btn btn-primary" id="btnSinonimizza" onclick="sinonimizza()">Sinonimizza</button>
+      <button class="btn btn-secondary" onclick="reSinonimizza()">Rigenera</button>
+      <div class="loading" id="loading">
+        <span class="quill">&#9998;</span>
+        <span>Lo scriba lavora&hellip;</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- OUTPUT -->
+  <div class="col-output">
+    <div class="pergamena-frame">
+      <div class="pergamena-inner">
+        <img src="/pergamena.png?v=5" alt="">
+        <div class="output-text" id="outputText"></div>
+      </div>
+    </div>
+    <div class="stats-row" id="statsBar">
+      <span>Parole <strong id="statTotal">0</strong></span>
+      <span>Sostituite <strong class="stat-hl" id="statReplaced">0</strong></span>
+      <span>(<strong class="stat-hl" id="statPct">0%</strong>)</span>
+      <button class="btn-copy" onclick="copyOutput()">Copia</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let currentTokens=[], currentSeed=null;
+const sl=document.getElementById('intensity'), sv=document.getElementById('intensityVal');
+sl.addEventListener('input',()=>{sv.textContent=sl.value+'%'});
+
+document.getElementById('inputText').addEventListener('input',function(){
+  const w=this.value.trim().split(/\s+/).filter(w=>w.length>0);
+  document.getElementById('inputCount').textContent=w.length+' parole';
+});
+document.getElementById('inputText').addEventListener('keydown',function(e){
+  if(e.ctrlKey&&e.key==='Enter') sinonimizza();
+});
+
+async function sinonimizza(){
+  const t=document.getElementById('inputText').value.trim();
+  if(!t) return;
+  currentSeed=Math.floor(Math.random()*1e6);
+  await doRequest(t,currentSeed);
+}
+async function reSinonimizza(){
+  const t=document.getElementById('inputText').value.trim();
+  if(!t) return;
+  currentSeed=Math.floor(Math.random()*1e6);
+  await doRequest(t,currentSeed);
+}
+
+async function doRequest(text,seed){
+  const btn=document.getElementById('btnSinonimizza'), ld=document.getElementById('loading');
+  btn.disabled=true; ld.classList.add('active');
+  try{
+    const r=await fetch('/api/sinonimizza',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text,intensity:parseInt(sl.value),seed})});
+    currentTokens=(await r.json()).tokens;
+    renderOutput();
+  }catch(e){document.getElementById('outputText').textContent='Errore: '+e.message}
+  btn.disabled=false; ld.classList.remove('active');
+}
+
+function renderOutput(){
+  const c=document.getElementById('outputText');
+  c.innerHTML='';
+  let tw=0, rw=0;
+  currentTokens.forEach(t=>{
+    if(/^[a-zA-Z\u00C0-\u024F']+$/.test(t.original)) tw++;
+    if(t.replaced){
+      rw++;
+      const s=document.createElement('span');
+      s.className='token-replaced';
+      s.textContent=t.replacement;
+      s.title=t.original+' \u2192 '+t.replacement;
+      c.appendChild(s);
+    } else c.appendChild(document.createTextNode(t.replacement));
+  });
+  document.getElementById('statTotal').textContent=tw;
+  document.getElementById('statReplaced').textContent=rw;
+  document.getElementById('statPct').textContent=tw>0?Math.round(100*rw/tw)+'%':'0%';
+  document.getElementById('statsBar').style.display='flex';
+}
+
+function copyOutput(){
+  navigator.clipboard.writeText(currentTokens.map(t=>t.replacement).join('')).then(()=>{
+    const b=document.querySelector('.btn-copy'), o=b.textContent;
+    b.textContent='Copiato!'; setTimeout(()=>b.textContent=o,1500);
+  });
+}
+
+fetch('/api/stats').then(r=>r.json()).then(d=>{
+  document.getElementById('dbLemmas').textContent=d.lemmas?.toLocaleString('it-IT')||'--';
+  document.getElementById('dbForms').textContent=d.forms?.toLocaleString('it-IT')||'--';
+  document.getElementById('dbSynonyms').textContent=d.synonyms?.toLocaleString('it-IT')||'--';
+});
+</script>
+</body>
+</html>

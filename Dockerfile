@@ -7,6 +7,7 @@ COPY sinonimizzatore.py .
 COPY morphit.db .
 COPY pergamena.png .
 COPY sfondo.png .
+COPY index.html .
 
 ENV HOST=0.0.0.0
 EXPOSE 8080

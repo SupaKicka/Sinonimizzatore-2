@@ -23,7 +23,7 @@ import sys
 import re
 import random
 import argparse
-from collections import defaultdict
+from collections import defaultdict, Counter
 from urllib.parse import urlparse, parse_qs
 
 # ─── Configurazione ──────────────────────────────────────────────────────────
@@ -42,6 +42,17 @@ SKIP_POS = frozenset({
 
 # POS sostituibili
 REPLACE_POS = frozenset({"NOUN", "VER", "ADJ", "ADV"})
+
+# Parole che non devono MAI essere sostituite (negazioni, particelle, ecc.)
+# Hanno POS sostituibile (ADV) ma cambiarle altera il significato della frase
+NEVER_REPLACE = frozenset({
+    "non", "né", "neanche", "neppure", "nemmeno",  # negazioni
+    "sì", "no",                                      # affermazione/negazione
+    "più", "meno",                                   # comparativi strutturali
+    "come", "così", "quanto",                        # comparativi/correlativi
+    "dove", "quando", "perché", "perchè",            # interrogativi/relativi
+    "anche", "pure", "proprio", "già", "ancora",     # particelle modali
+})
 
 
 # ─── Motore Sinonimizzatore ──────────────────────────────────────────────────
@@ -123,6 +134,28 @@ class SinonimizzatoreEngine:
             if lemma_lower in adj_lemmas:
                 self.also_adj.add(lid)
         print(f"{len(self.also_adj):,} nomi anche aggettivi.")
+
+        # multiword_index: prima_parola -> [(espressione_intera, [replacement, ...], num_token)]
+        # Usato per matching longest-match delle espressioni multi-parola
+        print("  Caricamento espressioni multi-parola...", end=" ", flush=True)
+        self.multiword_index = defaultdict(list)
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='multiword'")
+        if cur.fetchone():
+            cur.execute("SELECT expression, replacement FROM multiword")
+            expr_map = defaultdict(list)
+            for expr, repl in cur.fetchall():
+                expr_map[expr].append(repl)
+            for expr, repls in expr_map.items():
+                words = expr.split()
+                if words:
+                    first = words[0]
+                    self.multiword_index[first].append((expr, repls, len(words)))
+            # Ordina per lunghezza decrescente (longest match first)
+            for key in self.multiword_index:
+                self.multiword_index[key].sort(key=lambda x: -x[2])
+            print(f"{len(expr_map):,} espressioni caricate.")
+        else:
+            print("tabella non trovata, skip.")
         print("  Pronto!\n")
 
     # ── Regole articoli italiani ────────────────────────────────────────────
@@ -155,6 +188,73 @@ class SinonimizzatoreEngine:
                          ("coi", ("con", "def", "m", "p")), ("cogli", ("con", "def", "m", "p")),
                          ("colle", ("con", "def", "f", "p"))]:
         ARTPRE_MAP[_form] = _info
+
+    # Dimostrativi: (genere, numero) — seguono le stesse regole fonetiche degli articoli
+    # quel/quello/quell'/quella → singolare; quei/quegli/quelle → plurale
+    DEMONSTRATIVE_MAP = {
+        "quel": ("m", "s"), "quello": ("m", "s"), "quell'": (None, "s"),
+        "quella": ("f", "s"),
+        "quei": ("m", "p"), "quegli": ("m", "p"), "quelle": ("f", "p"),
+        # Anche "bel/bello/bell'/bella/bei/begli/belle" seguono lo stesso pattern
+        "bel": ("m", "s"), "bello": ("m", "s"), "bell'": (None, "s"),
+        "bella": ("f", "s"),
+        "bei": ("m", "p"), "begli": ("m", "p"), "belle": ("f", "p"),
+        # "buon/buono/buon'/buona"
+        "buon": ("m", "s"), "buono": ("m", "s"), "buon'": (None, "s"),
+        "buona": ("f", "s"),
+        "buoni": ("m", "p"), "buone": ("f", "p"),
+        # "gran/grande/grand'"
+        "gran": (None, "s"), "grande": (None, "s"), "grand'": (None, "s"),
+        "grandi": (None, "p"),
+        # "san/santo/sant'/santa"
+        "san": ("m", "s"), "santo": ("m", "s"), "sant'": (None, "s"),
+        "santa": ("f", "s"), "santi": ("m", "p"), "sante": ("f", "p"),
+    }
+
+    # Famiglie di dimostrativi: radice -> (forma_il, forma_lo, forma_elisione, forma_la, forma_i, forma_gli, forma_le)
+    _DEMO_FAMILIES = {
+        "quel":  ("quel", "quello", "quell'", "quella", "quei", "quegli", "quelle"),
+        "bel":   ("bel", "bello", "bell'", "bella", "bei", "begli", "belle"),
+        "buon":  ("buon", "buono", "buon'", "buona", "buoni", "buoni", "buone"),
+        "san":   ("san", "santo", "sant'", "santa", "santi", "santi", "sante"),
+    }
+
+    def _get_demo_family(self, word_lower):
+        """Trova la famiglia del dimostrativo dalla forma."""
+        for root, forms in self._DEMO_FAMILIES.items():
+            if word_lower.rstrip("'") in [f.rstrip("'") for f in forms] or word_lower in forms:
+                return root, forms
+        return None, None
+
+    def _compute_demonstrative(self, demo_word, next_word, gender, number):
+        """Calcola la forma corretta del dimostrativo per la parola seguente.
+
+        Args:
+            demo_word: il dimostrativo originale (es. "quel", "bello")
+            next_word: la parola successiva (il nome) per le regole fonetiche
+            gender: genere del nome
+            number: numero del nome
+        """
+        vowel = self._starts_with_vowel(next_word)
+        lo = self._needs_lo(next_word)
+
+        root, forms = self._get_demo_family(demo_word.lower())
+        if not forms:
+            return None
+
+        # forms = (il, lo, elisione, la, i, gli, le)
+        if number == "s":
+            if gender == "m":
+                if vowel:
+                    return forms[2]   # quell', bell', ...
+                return forms[1] if lo else forms[0]  # quello/quel, bello/bel
+            else:  # f
+                return forms[2] if vowel else forms[3]  # quell'/quella, bell'/bella
+        else:  # p
+            if gender == "m":
+                return forms[5] if (vowel or lo) else forms[4]  # quegli/quei, begli/bei
+            else:
+                return forms[6]  # quelle, belle
 
     @staticmethod
     def _needs_lo(word):
@@ -225,14 +325,52 @@ class SinonimizzatoreEngine:
             else:
                 return base + "lle"
 
+    # Regex per riconoscere token-parola (con lettere accentate italiane e trattino per composti)
+    _WORD_RE = re.compile(r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ'\-]+$")
+    _LETTER_CLASS = r"a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ"
+
     def tokenize(self, text):
-        """Tokenizza preservando spazi e punteggiatura. Separa apostrofi articolati."""
-        # Ordine: parola+apostrofo (l', un', dell'), poi parola, poi singolo char, poi spazi
+        """Tokenizza preservando spazi e punteggiatura. Separa apostrofi articolati.
+        Cattura parole composte con trattino (nord-est, porta-finestra) come token unico."""
+        # Ordine di priorità:
+        # 1. parola-parola (composti con trattino)
+        # 2. parola+apostrofo (l', un', dell')
+        # 3. parola semplice
+        # 4. singolo carattere non-spazio
+        # 5. sequenze di spazi
+        L = self._LETTER_CLASS
         tokens = re.findall(
-            r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ]+'|[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ]+|[^\s]|\s+",
+            rf"[{L}]+(?:-[{L}]+)+'|[{L}]+(?:-[{L}]+)+|[{L}]+'|[{L}]+|[^\s]|\s+",
             text
         )
         return tokens
+
+    # Pronomi clitici che precedono un verbo (mi alzo, si veste, ci arrabbiamo)
+    _CLITIC_PRONOUNS = frozenset({
+        "mi", "ti", "si", "ci", "vi", "me", "te", "se", "ce", "ve",
+        "lo", "la", "li", "le", "ne", "gli",
+    })
+
+    # Suffissi clitici postposti ai verbi (alzarsi, dimmi, portalo)
+    # Ordine: dal più lungo al più corto per match greedy
+    _CLITIC_SUFFIXES = [
+        "glielo", "gliela", "glieli", "gliele", "gliene",
+        "melo", "mela", "meli", "mele", "mene",
+        "telo", "tela", "teli", "tele", "tene",
+        "selo", "sela", "seli", "sele", "sene",
+        "celo", "cela", "celi", "cele", "cene",
+        "velo", "vela", "veli", "vele", "vene",
+        "gli", "mi", "ti", "si", "ci", "vi",
+        "lo", "la", "li", "le", "ne",
+    ]
+
+    # Preposizioni semplici e locuzioni prepositive — la parola dopo è quasi sempre NOUN
+    _PREPOSITIONS = frozenset({
+        "di", "a", "da", "in", "con", "su", "per", "tra", "fra",
+        "verso", "dopo", "prima", "durante", "mediante", "nonostante",
+        "oltre", "senza", "sotto", "sopra", "contro", "dentro", "fuori",
+        "lungo", "presso", "secondo", "attraverso", "entro", "fino",
+    })
 
     # Articoli e determinanti che precedono un nome
     _DETERMINERS = frozenset({
@@ -253,25 +391,109 @@ class SinonimizzatoreEngine:
         "altro", "altra", "altri", "altre",
     })
 
-    def _find_word_info(self, word, prev_word=None):
-        """Trova info morfologiche per una parola. Ritorna lista di match."""
+    def _strip_clitic(self, word):
+        """Prova a strippare un clitico postposto da un verbo.
+        Ritorna (base_verb, clitic_suffix) o (word, None) se non è un verbo+clitico."""
+        w = word.lower()
+        for suffix in self._CLITIC_SUFFIXES:
+            if w.endswith(suffix) and len(w) > len(suffix) + 2:
+                base = w[:-len(suffix)]
+                # Verifica che la base sia un verbo nel form_index
+                # Per infiniti: alzar+si → alzare (aggiungi -e)
+                # Per imperativi: alzati → alza (base diretta)
+                candidates = [base]
+                if not base.endswith(("are", "ere", "ire")):
+                    # Potrebbe essere infinito troncato: parlar+si → parlare
+                    candidates.append(base + "e")
+                    # O imperativo: alzati → alza+ti, base=alza
+                for cand in candidates:
+                    if self.form_index.get(cand):
+                        return cand, suffix
+        return word, None
+
+    def _find_word_info(self, word, prev_word=None, next_word=None):
+        """Trova info morfologiche per una parola. Ritorna lista di match ordinata per priorità.
+
+        Usa contesto (prev_word, next_word) per disambiguare NOUN/VER/ADJ:
+        - prev_word = determinante → NOUN  ("il canto" → canto = nome)
+        - prev_word = clitico → VER         ("mi alzo" → alzo = verbo)
+        - next_word = determinante → VER   ("porto il cane" → porto = verbo)
+        - next_word = NOUN → boost ADJ     ("caldo sole" → caldo = aggettivo)
+        """
         matches = self.form_index.get(word.lower(), [])
+        if not matches and '-' in word:
+            # Fallback per parole composte: cerca la testa (primo componente)
+            head = word.split('-')[0]
+            matches = self.form_index.get(head.lower(), [])
+        if not matches:
+            # Fallback: prova a strippare clitico postposto (alzarsi → alzare)
+            base, clitic = self._strip_clitic(word)
+            if clitic:
+                matches = self.form_index.get(base, [])
         if not matches:
             return []
 
         has_noun = any(m["pos"] == "NOUN" for m in matches)
         has_conjugated_verb = any(m["pos"] == "VER" and m.get("person") and m.get("mood") == "ind" for m in matches)
+        has_adj = any(m["pos"] == "ADJ" for m in matches)
 
-        # Disambiguazione NOUN vs VER coniugato con contesto:
-        # Se preceduta da articolo/determinante -> sicuramente NOUN
-        #   Es: "un testo", "il canto", "del suono"
-        # Altrimenti, VER coniugato è più probabile
-        #   Es: "io suono", "scrivo un testo"
-        if has_noun and has_conjugated_verb:
-            if prev_word and prev_word.lower() in self._DETERMINERS:
-                pos_priority = {"NOUN": 0, "VER": 1, "ADJ": 2, "ADV": 3}
+        # Analisi contesto successivo
+        next_is_determiner = next_word and next_word.lower() in self._DETERMINERS
+        next_is_noun = False
+        if next_word and not next_is_determiner:
+            next_matches = self.form_index.get(next_word.lower(), [])
+            next_is_noun = any(m["pos"] == "NOUN" for m in next_matches)
+
+        # Contesto: clitico preposto → sicuramente VER
+        # Ma lo/la/li/le sono ambigui (articoli O clitici) → trattali come determinanti
+        prev_lw = prev_word.lower() if prev_word else ""
+        prev_is_determiner = prev_lw in self._DETERMINERS
+        prev_is_clitic = (prev_lw in self._CLITIC_PRONOUNS and not prev_is_determiner)
+
+        # Se prev_word è una preposizione → questa parola è quasi certamente NOUN
+        if prev_lw in self._PREPOSITIONS and has_noun:
+            pos_priority = {"NOUN": 0, "ADJ": 1, "VER": 2, "ADV": 3}
+            mood_priority = {"ind": 0, "sub": 1, "cond": 2, "inf": 3, "part": 4, "ger": 5, "impr": 6}
+            def sort_key(m):
+                p = pos_priority.get(m["pos"], 99)
+                mood = mood_priority.get(m.get("mood") or "", 99)
+                has_info = 0 if (m.get("gender") or m.get("number") or m.get("person")) else 1
+                return (p, mood, has_info)
+            matches.sort(key=sort_key)
+            return matches
+
+        # Disambiguazione NOUN vs VER vs ADJ con contesto bidirezionale
+        # Regola 1 (universale): dopo un determinante → NOUN
+        if prev_is_determiner and has_noun:
+            pos_priority = {"NOUN": 0, "ADJ": 1, "VER": 2, "ADV": 3}
+        # Regola 2: clitico → VER
+        elif prev_is_clitic and has_conjugated_verb:
+            pos_priority = {"VER": 0, "NOUN": 1, "ADJ": 2, "ADV": 3}
+        # Regola 3: ambiguità NOUN/VER con contesto
+        elif has_noun and has_conjugated_verb:
+            if next_is_determiner:
+                pos_priority = {"VER": 0, "NOUN": 1, "ADJ": 2, "ADV": 3}
             else:
                 pos_priority = {"VER": 0, "NOUN": 1, "ADJ": 2, "ADV": 3}
+        elif has_adj and has_noun and next_is_noun:
+            # "caldo sole", "grande uomo" → ADJ che modifica il nome successivo
+            pos_priority = {"ADJ": 0, "NOUN": 1, "VER": 2, "ADV": 3}
+        elif has_adj and has_noun and prev_word:
+            prev_lower = prev_word.lower()
+            prev_matches = self.form_index.get(prev_lower, [])
+            prev_is_noun = any(m["pos"] == "NOUN" for m in prev_matches)
+            # "verso", "dopo", "prima", ecc. sono anche NOUN nel DB ma funzionano come preposizioni
+            # Se prev_word è in _DETERMINERS o è una preposizione → boost NOUN
+            prev_is_prep = prev_lower in self._PREPOSITIONS
+            if prev_is_prep:
+                # "verso fine", "dopo pranzo", "prima sera" → NOUN
+                pos_priority = {"NOUN": 0, "ADJ": 1, "VER": 2, "ADV": 3}
+            elif prev_is_noun and not any(m["pos"] in ("VER", "ADV") for m in prev_matches):
+                # "amico fedele", "casa grande" → ADJ postposto
+                # Ma solo se prev_word è puramente un NOUN (non anche VER/ADV/PREP)
+                pos_priority = {"ADJ": 0, "NOUN": 1, "VER": 2, "ADV": 3}
+            else:
+                pos_priority = {"NOUN": 0, "VER": 1, "ADJ": 2, "ADV": 3}
         else:
             pos_priority = {"NOUN": 0, "VER": 1, "ADJ": 2, "ADV": 3}
 
@@ -279,12 +501,42 @@ class SinonimizzatoreEngine:
         # molto più frequente dell'imperativo o del congiuntivo.
         mood_priority = {"ind": 0, "sub": 1, "cond": 2, "inf": 3, "part": 4, "ger": 5, "impr": 6}
 
+        # Concordanza soggetto-verbo: se il nome/pronome precedente indica
+        # un numero, preferisci la forma verbale concordante
+        # "i giorni sono" → plurale → 3p; "io sono" → singolare → 1s
+        _PRONOUN_NUMBER = {
+            "io": ("s", "1"), "tu": ("s", "2"), "lui": ("s", "3"),
+            "lei": ("s", "3"), "esso": ("s", "3"), "essa": ("s", "3"),
+            "noi": ("p", "1"), "voi": ("p", "2"), "loro": ("p", "3"),
+            "essi": ("p", "3"), "esse": ("p", "3"),
+        }
+        subject_number = None
+        subject_person = None
+        if prev_word:
+            pn = _PRONOUN_NUMBER.get(prev_lw)
+            if pn:
+                subject_number, subject_person = pn
+            else:
+                prev_matches_all = self.form_index.get(prev_lw, [])
+                for pm in prev_matches_all:
+                    if pm["pos"] == "NOUN" and pm.get("number"):
+                        subject_number = pm["number"]
+                        subject_person = "3"  # nomi sono sempre 3a persona
+                        break
+
         def sort_key(m):
             p = pos_priority.get(m["pos"], 99)
             mood = mood_priority.get(m.get("mood") or "", 99)
             # Penalizza match senza genere/numero (meno informativi)
             has_info = 0 if (m.get("gender") or m.get("number") or m.get("person")) else 1
-            return (p, mood, has_info)
+            # Concordanza soggetto-verbo (numero e persona)
+            number_mismatch = 0
+            if m["pos"] == "VER" and (subject_number or subject_person):
+                if subject_number and m.get("number") and m["number"] != subject_number:
+                    number_mismatch = 1
+                if subject_person and m.get("person") and m["person"] != subject_person:
+                    number_mismatch = 1
+            return (p, mood, number_mismatch, has_info)
 
         matches.sort(key=sort_key)
         return matches
@@ -332,8 +584,32 @@ class SinonimizzatoreEngine:
             return None
 
         if original_pos == "VER":
-            # Verbi: matcha mood + tense + person + number
             tp = target_props
+            # Participi: devono matchare anche genere + numero
+            if tp.get("mood") == "part":
+                for f in forms:
+                    if (f["pos"] == "VER"
+                            and f["mood"] == "part"
+                            and f["tense"] == tp.get("tense")
+                            and f.get("gender") == tp.get("gender")
+                            and f.get("number") == tp.get("number")):
+                        return f["form"]
+                # Fallback: solo mood + tense + number (senza genere)
+                for f in forms:
+                    if (f["pos"] == "VER"
+                            and f["mood"] == "part"
+                            and f["tense"] == tp.get("tense")
+                            and f.get("number") == tp.get("number")):
+                        return f["form"]
+                # Ultimo fallback: qualsiasi participio dello stesso tense
+                for f in forms:
+                    if (f["pos"] == "VER"
+                            and f["mood"] == "part"
+                            and f["tense"] == tp.get("tense")):
+                        return f["form"]
+                return None
+
+            # Verbi non-participi: matcha mood + tense + person + number
             for f in forms:
                 if (f["pos"] == "VER"
                         and f["mood"] == tp.get("mood")
@@ -341,7 +617,7 @@ class SinonimizzatoreEngine:
                         and f["person"] == tp.get("person")
                         and f["number"] == tp.get("number")):
                     return f["form"]
-            # Fallback: mood + tense + person (senza numero per infinito, gerundio)
+            # Fallback: mood + tense (per infinito, gerundio)
             for f in forms:
                 if (f["pos"] == "VER"
                         and f["mood"] == tp.get("mood")
@@ -374,7 +650,6 @@ class SinonimizzatoreEngine:
         if not genders:
             return None
         # Ritorna il genere più frequente
-        from collections import Counter
         return Counter(genders).most_common(1)[0][0]
 
     # POS che si flettono per genere/numero come gli aggettivi
@@ -552,6 +827,136 @@ class SinonimizzatoreEngine:
                             self._apply_article_change(tok, new_form, results, i, j)
             i += 1
 
+        # Fase 3: Aggiusta dimostrativi (quel/quello/quell', bel/bello/bell', ecc.)
+        i = 0
+        while i < len(results):
+            tok = results[i]
+            tok_lower = tok["replacement"].lower() if tok.get("replacement") else tok["original"].lower()
+
+            demo_info = self.DEMONSTRATIVE_MAP.get(tok_lower)
+            if demo_info:
+                demo_gender, demo_number = demo_info
+
+                # Trova la prossima parola di contenuto (salta spazi)
+                j = i + 1
+                while j < len(results):
+                    if results[j].get("replacement", results[j]["original"]).strip():
+                        break
+                    j += 1
+
+                if j < len(results):
+                    next_word = results[j].get("replacement", results[j]["original"])
+
+                    # Determina genere/numero dal nome più vicino
+                    rpl_gender = None
+                    rpl_number = None
+                    for scan in range(j, min(j + 4, len(results))):
+                        sr = results[scan]
+                        if sr.get("gender") and sr.get("pos") == "NOUN":
+                            rpl_gender = sr["gender"]
+                            rpl_number = sr.get("number", demo_number)
+                            break
+                        elif sr.get("replaced") and sr.get("gender"):
+                            rpl_gender = sr["gender"]
+                            rpl_number = sr.get("number", demo_number)
+                            break
+
+                    if not rpl_gender:
+                        rpl_gender = demo_gender
+                        rpl_number = demo_number
+
+                    if rpl_gender and rpl_number:
+                        new_form = self._compute_demonstrative(
+                            tok_lower, next_word, rpl_gender, rpl_number
+                        )
+                        if new_form and new_form.lower() != tok_lower:
+                            self._apply_article_change(tok, new_form, results, i, j)
+            i += 1
+
+    def _postprocess_participles(self, results):
+        """Aggiusta participi passati quando l'ausiliare è 'essere'.
+
+        Con 'essere', il participio concorda col soggetto in genere e numero:
+          "Le ragazze sono andate" → se "ragazze" cambia genere → adattare "andate"
+          "I gatti sono partiti" → se "gatti" → "bestie" (f) → "partite"
+        """
+        for i, tok in enumerate(results):
+            # Cerco participi passati (parole che sono state sostituite come VER)
+            if not tok.get("replaced") or tok.get("pos") != "VER":
+                continue
+            if tok.get("mood") != "part" or tok.get("tense") != "past":
+                # Questo token potrebbe non avere mood/tense se non salvati.
+                # Verifichiamo dalla forma originale nel form_index.
+                orig_lower = tok["original"].lower()
+                orig_matches = self.form_index.get(orig_lower, [])
+                is_participle = any(
+                    m["pos"] == "VER" and m.get("mood") == "part" and m.get("tense") == "past"
+                    for m in orig_matches
+                )
+                if not is_participle:
+                    continue
+
+            # Cerco l'ausiliare all'indietro (saltando spazi e avverbi)
+            aux_word = None
+            j = i - 1
+            while j >= 0:
+                text_j = results[j].get("replacement", results[j]["original"]).strip()
+                if not text_j:
+                    j -= 1
+                    continue
+                text_j_lower = text_j.lower()
+                # È un avverbio? Salta e continua a cercare
+                if self.form_index.get(text_j_lower):
+                    if any(m["pos"] == "ADV" for m in self.form_index[text_j_lower]):
+                        j -= 1
+                        continue
+                aux_word = text_j_lower
+                break
+
+            if not aux_word or aux_word not in self._ESSERE_FORMS:
+                continue
+
+            # L'ausiliare è "essere" → cerco il soggetto NOUN all'indietro
+            subj_tok = None
+            k = j - 1
+            while k >= 0:
+                text_k = results[k].get("replacement", results[k]["original"]).strip()
+                if not text_k:
+                    k -= 1
+                    continue
+                if results[k].get("pos") == "NOUN":
+                    subj_tok = results[k]
+                    break
+                # Se troviamo punteggiatura forte, stop
+                if text_k in (".", "!", "?", ";"):
+                    break
+                k -= 1
+
+            if not subj_tok or not subj_tok.get("gender_changed"):
+                continue
+
+            # Il soggetto ha cambiato genere → devo riadattare il participio
+            new_gender = subj_tok["gender"]
+            new_number = subj_tok.get("number", "s")
+
+            # Trovo il lemma del participio sostituto e cerco la forma corretta
+            repl_lower = tok["replacement"].lower()
+            repl_matches = self.form_index.get(repl_lower, [])
+            for m in repl_matches:
+                if m["pos"] == "VER" and m.get("mood") == "part" and m.get("tense") == "past":
+                    # Trovato il lemma: cerco la forma con il nuovo genere/numero
+                    forms = self.lemma_forms.get(m["lemma_id"], [])
+                    for f in forms:
+                        if (f["pos"] == "VER" and f.get("mood") == "part"
+                                and f.get("tense") == "past"
+                                and f.get("gender") == new_gender
+                                and f.get("number") == new_number):
+                            tok["replacement"] = self._apply_capitalization(
+                                tok["original"], f["form"]
+                            )
+                            break
+                    break
+
     # Forme di "avere" e "essere" usate come ausiliari nei tempi composti
     _AVERE_FORMS = {
         "ho", "hai", "ha", "abbiamo", "avete", "hanno",           # ind pres
@@ -581,13 +986,12 @@ class SinonimizzatoreEngine:
         # Cerca il prossimo token-parola (salta spazi e punteggiatura)
         j = idx + 1
         while j < len(tokens):
-            if re.match(r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ']+$", tokens[j]):
+            if self._WORD_RE.match(tokens[j]):
                 break
             if not tokens[j].strip():
                 j += 1
                 continue
             return False  # punteggiatura prima di una parola -> non è ausiliare
-            j += 1
 
         if j >= len(tokens):
             return False
@@ -601,7 +1005,9 @@ class SinonimizzatoreEngine:
             # Anche participi passati usati come aggettivi (es. "mangiato", "andato")
             if m["pos"] == "ADJ" and m.get("degree") is None:
                 # Verifica se è anche un participio di qualche verbo
-                pass
+                verb_matches = self.form_index.get(next_word, [])
+                if any(vm["pos"] == "VER" and vm.get("mood") == "part" and vm.get("tense") == "past" for vm in verb_matches):
+                    return True
 
         # Gestisce anche avverbi interposti: "ho SEMPRE mangiato", "non ha MAI visto"
         if j < len(tokens):
@@ -611,13 +1017,12 @@ class SinonimizzatoreEngine:
                 # Guarda ancora più avanti
                 k = j + 1
                 while k < len(tokens):
-                    if re.match(r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ']+$", tokens[k]):
+                    if self._WORD_RE.match(tokens[k]):
                         break
                     if not tokens[k].strip():
                         k += 1
                         continue
                     return False
-                    k += 1
                 if k < len(tokens):
                     far_word = tokens[k].lower()
                     far_matches = self.form_index.get(far_word, [])
@@ -631,7 +1036,7 @@ class SinonimizzatoreEngine:
         """Controlla se la parola precedente (saltando spazi/avverbi) è un ausiliare."""
         j = idx - 1
         while j >= 0:
-            if re.match(r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ']+$", tokens[j]):
+            if self._WORD_RE.match(tokens[j]):
                 break
             if not tokens[j].strip():
                 j -= 1
@@ -650,7 +1055,7 @@ class SinonimizzatoreEngine:
         if any(m["pos"] == "ADV" for m in word_matches):
             k = j - 1
             while k >= 0:
-                if re.match(r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ']+$", tokens[k]):
+                if self._WORD_RE.match(tokens[k]):
                     break
                 if not tokens[k].strip():
                     k -= 1
@@ -683,9 +1088,68 @@ class SinonimizzatoreEngine:
         tokens = self.tokenize(text)
         results = []
 
+        # Fase 0: Matching espressioni multi-parola (longest-match, greedy)
+        # Segna i token consumati e registra le sostituzioni
+        multiword_replacements = {}  # ti -> (end_ti, replacement_text)
+        multiword_consumed = set()   # indici di token consumati
+        if self.multiword_index:
+            # Estrai solo i token-parola con i loro indici
+            word_tokens = [(i, t) for i, t in enumerate(tokens) if self._WORD_RE.match(t)]
+
+            for wi, (ti_start, tok_start) in enumerate(word_tokens):
+                if ti_start in multiword_consumed:
+                    continue
+                tok_lower = tok_start.lower()
+                candidates = self.multiword_index.get(tok_lower, [])
+                if not candidates:
+                    continue
+
+                # Costruisci la sequenza di parole da questa posizione in poi
+                remaining_words = [t.lower() for _, t in word_tokens[wi:wi+6]]
+
+                for expr, repls, num_words in candidates:
+                    expr_words = expr.split()
+                    if len(remaining_words) < num_words:
+                        continue
+                    if remaining_words[:num_words] == expr_words:
+                        # Match! Scegli un replacement casuale
+                        if rng.randint(1, 100) > intensity:
+                            break  # Skip per intensità
+                        repl = rng.choice(repls)
+                        # Segna tutti i token di questa espressione come consumati
+                        matched_indices = [word_tokens[wi + k][0] for k in range(num_words)]
+                        for idx in matched_indices:
+                            multiword_consumed.add(idx)
+                        # Anche gli spazi tra i token sono consumati
+                        for idx in range(matched_indices[0], matched_indices[-1] + 1):
+                            multiword_consumed.add(idx)
+                        multiword_replacements[matched_indices[0]] = (
+                            matched_indices[-1],
+                            self._apply_capitalization(tok_start, repl),
+                            expr,
+                            [self._apply_capitalization(tok_start, r) for r in repls],
+                        )
+                        break
+
         for ti, token in enumerate(tokens):
+            # Se questo token fa parte di una espressione multi-parola sostituita
+            if ti in multiword_consumed:
+                if ti in multiword_replacements:
+                    end_ti, repl_text, orig_expr, all_repls = multiword_replacements[ti]
+                    # Ricostruisci il testo originale dell'espressione
+                    orig_text = ''.join(tokens[ti:end_ti+1])
+                    results.append({
+                        "original": orig_text,
+                        "replacement": repl_text,
+                        "replaced": True,
+                        "pos": "MULTI",
+                        "synonyms": all_repls[:15],
+                    })
+                # Token intermedi dell'espressione: già inclusi nell'originale sopra
+                continue
+
             # Skip spazi e punteggiatura
-            if not re.match(r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ']+$", token):
+            if not self._WORD_RE.match(token):
                 results.append({
                     "original": token,
                     "replacement": token,
@@ -697,14 +1161,31 @@ class SinonimizzatoreEngine:
             # Trova il token-parola precedente (saltando spazi/punteggiatura)
             prev_word = None
             for pi in range(ti - 1, -1, -1):
-                if re.match(r"[a-zA-ZàèéìòùÀÈÉÌÒÙäëïöüâêîôûçñ']+$", tokens[pi]):
+                if self._WORD_RE.match(tokens[pi]):
                     prev_word = tokens[pi]
                     break
                 if tokens[pi].strip():
                     break  # punteggiatura, non continuare
 
+            # Trova il token-parola successivo (saltando spazi/punteggiatura)
+            next_word = None
+            for ni in range(ti + 1, len(tokens)):
+                if self._WORD_RE.match(tokens[ni]):
+                    next_word = tokens[ni]
+                    break
+                if tokens[ni].strip():
+                    break  # punteggiatura, non continuare
+
+            # Controlla se il token ha un clitico postposto (alzarsi, dimmi, portalo)
+            clitic_suffix = None
+            base_for_clitic = None
+            stripped_base, stripped_clitic = self._strip_clitic(token)
+            if stripped_clitic and self.form_index.get(stripped_base.lower()):
+                clitic_suffix = stripped_clitic
+                base_for_clitic = stripped_base
+
             # Trova info morfologiche
-            matches = self._find_word_info(token, prev_word=prev_word)
+            matches = self._find_word_info(token, prev_word=prev_word, next_word=next_word)
             if not matches:
                 results.append({
                     "original": token,
@@ -738,6 +1219,16 @@ class SinonimizzatoreEngine:
                 })
                 continue
 
+            # Skip parole che non devono mai essere sostituite (negazioni, particelle)
+            if token.lower() in NEVER_REPLACE:
+                results.append({
+                    "original": token,
+                    "replacement": token,
+                    "replaced": False,
+                    "synonyms": [],
+                })
+                continue
+
             # Skip ausiliari nei tempi composti: "ho mangiato", "è andato",
             # "aveva detto", "avrei voluto", "ha sempre creduto"
             if self._is_auxiliary_before_participle(tokens, ti):
@@ -748,6 +1239,36 @@ class SinonimizzatoreEngine:
                     "synonyms": [],
                 })
                 continue
+
+            # Skip clitici pronominali prima di un verbo (mi, ti, si, ci, vi, ne)
+            # "ci arrabbiamo" → "ci" non va sostituito con "vi"
+            if token.lower() in self._CLITIC_PRONOUNS and next_word:
+                next_matches = self.form_index.get(next_word.lower(), [])
+                if any(m["pos"] == "VER" for m in next_matches):
+                    results.append({
+                        "original": token,
+                        "replacement": token,
+                        "replaced": False,
+                        "synonyms": [],
+                    })
+                    continue
+
+            # Skip preposizioni quando seguite da un NOUN/determinante
+            # "verso fine", "dopo pranzo", "durante la lezione" → non sostituire la preposizione
+            if token.lower() in self._PREPOSITIONS and next_word:
+                next_lower = next_word.lower()
+                next_could_be_noun = (
+                    next_lower in self._DETERMINERS
+                    or any(m["pos"] == "NOUN" for m in self.form_index.get(next_lower, []))
+                )
+                if next_could_be_noun:
+                    results.append({
+                        "original": token,
+                        "replacement": token,
+                        "replaced": False,
+                        "synonyms": [],
+                    })
+                    continue
 
             # Controlla intensità
             if rng.randint(1, 100) > intensity:
@@ -771,18 +1292,26 @@ class SinonimizzatoreEngine:
                 continue
 
             # Per i nomi: separa sinonimi per genere, preferisci stesso genere
+            # I sinonimi "figurativi" (lemmi che sono anche ADJ) sono usati come fallback
             same_gender_syns = []
             diff_gender_syns = []
+            same_gender_figurative = []
+            diff_gender_figurative = []
             if best["pos"] == "NOUN" and best["gender"]:
                 original_gender = best["gender"]
                 for s in synonyms:
-                    if s["lemma_id"] in self.also_adj:
-                        continue
+                    is_figurative = s["lemma_id"] in self.also_adj
                     syn_gender = self._gender_of_noun_lemma(s["lemma_id"])
                     if syn_gender == original_gender:
-                        same_gender_syns.append((s, original_gender))
+                        if is_figurative:
+                            same_gender_figurative.append((s, original_gender))
+                        else:
+                            same_gender_syns.append((s, original_gender))
                     elif syn_gender:
-                        diff_gender_syns.append((s, syn_gender))
+                        if is_figurative:
+                            diff_gender_figurative.append((s, syn_gender))
+                        else:
+                            diff_gender_syns.append((s, syn_gender))
 
             # Proprietà target per la flessione
             target_props = {
@@ -794,22 +1323,43 @@ class SinonimizzatoreEngine:
                 "degree": best["degree"],
             }
 
-            # Prova sinonimi: prima stesso genere, poi diverso (fallback)
+            # Prova sinonimi in ordine di priorità:
+            # 1. stesso genere normali
+            # 2. stesso genere figurativi
+            # 3. genere diverso normali
+            # 4. genere diverso figurativi
             all_alternatives = []
             chosen_gender = best.get("gender")
 
             if best["pos"] == "NOUN" and best["gender"]:
-                # Fase 1: stesso genere
+                # Fase 1: stesso genere (normali)
                 rng.shuffle(same_gender_syns)
                 for syn, sg in same_gender_syns:
                     form = self._find_synonym_form(syn["lemma_id"], target_props, "NOUN")
                     if form and form.lower() != token.lower():
                         all_alternatives.append((self._apply_capitalization(token, form), best["gender"]))
 
-                # Fase 2: genere diverso (fallback) — articolo/aggettivi saranno adattati
+                # Fase 2: stesso genere (figurativi)
+                if not all_alternatives:
+                    rng.shuffle(same_gender_figurative)
+                    for syn, sg in same_gender_figurative:
+                        form = self._find_synonym_form(syn["lemma_id"], target_props, "NOUN")
+                        if form and form.lower() != token.lower():
+                            all_alternatives.append((self._apply_capitalization(token, form), best["gender"]))
+
+                # Fase 3: genere diverso (normali) — articolo/aggettivi saranno adattati
                 if not all_alternatives:
                     rng.shuffle(diff_gender_syns)
                     for syn, sg in diff_gender_syns:
+                        diff_props = dict(target_props, gender=sg)
+                        form = self._find_synonym_form(syn["lemma_id"], diff_props, "NOUN")
+                        if form and form.lower() != token.lower():
+                            all_alternatives.append((self._apply_capitalization(token, form), sg))
+
+                # Fase 4: genere diverso (figurativi)
+                if not all_alternatives:
+                    rng.shuffle(diff_gender_figurative)
+                    for syn, sg in diff_gender_figurative:
                         diff_props = dict(target_props, gender=sg)
                         form = self._find_synonym_form(syn["lemma_id"], diff_props, "NOUN")
                         if form and form.lower() != token.lower():
@@ -824,8 +1374,27 @@ class SinonimizzatoreEngine:
 
             if all_alternatives:
                 chosen, chosen_gender = all_alternatives[0]
+
+                # Riattacca clitico postposto se presente (alzarsi → sollevarsi)
+                if clitic_suffix and best["pos"] == "VER":
+                    chosen_clean = chosen.lower()
+                    # Per infiniti: sollevare + si → sollevarsi (rimuovi -e finale)
+                    if chosen_clean.endswith(("are", "ere", "ire")):
+                        chosen = self._apply_capitalization(token, chosen_clean[:-1] + clitic_suffix)
+                    else:
+                        chosen = self._apply_capitalization(token, chosen_clean + clitic_suffix)
+                    # Aggiorna anche le alternative
+                    new_alts = []
+                    for alt, g in all_alternatives:
+                        a = alt.lower()
+                        if a.endswith(("are", "ere", "ire")):
+                            new_alts.append((self._apply_capitalization(token, a[:-1] + clitic_suffix), g))
+                        else:
+                            new_alts.append((self._apply_capitalization(token, a + clitic_suffix), g))
+                    all_alternatives = new_alts
+
                 gender_changed = (best["pos"] == "NOUN" and chosen_gender != best.get("gender"))
-                results.append({
+                result_entry = {
                     "original": token,
                     "replacement": chosen,
                     "replaced": True,
@@ -836,7 +1405,12 @@ class SinonimizzatoreEngine:
                     "number": best["number"],
                     "gender_changed": gender_changed,
                     "synonyms": [a[0] for a in all_alternatives[:15]],
-                })
+                }
+                # Per i verbi: salva mood e tense per il post-processing dei participi
+                if best["pos"] == "VER":
+                    result_entry["mood"] = best.get("mood")
+                    result_entry["tense"] = best.get("tense")
+                results.append(result_entry)
             else:
                 results.append({
                     "original": token,
@@ -845,8 +1419,10 @@ class SinonimizzatoreEngine:
                     "synonyms": [],
                 })
 
-        # Post-processing: aggiusta articoli e preposizioni articolate
+        # Post-processing: aggiusta articoli, preposizioni articolate e dimostrativi
         self._postprocess_articles(results)
+        # Post-processing: aggiusta participi passati con ausiliare "essere"
+        self._postprocess_participles(results)
 
         return results
 
@@ -863,458 +1439,11 @@ class SinonimizzatoreEngine:
 
 # ─── Interfaccia Web ─────────────────────────────────────────────────────────
 
-HTML_PAGE = r"""<!DOCTYPE html>
-<html lang="it">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Il Sinonimizzatore</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400;1,600;1,700&family=IM+Fell+English+SC&display=swap" rel="stylesheet">
-<style>
-  :root {
-    --parchment: #f5e6c8;
-    --parchment-dark: #d4b896;
-    --ink: #2c1810;
-    --ink-light: #5a3e2b;
-    --ink-faded: #8b7355;
-    --gold: #8b6914;
-    --gold-light: #c4a035;
-    --gold-bright: #d4af37;
-    --red-ink: #7a1a1a;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+# Carica HTML da file esterno (index.html nella stessa directory)
+HTML_PATH = os.path.join(SCRIPT_DIR, "index.html")
+with open(HTML_PATH, "r", encoding="utf-8") as _f:
+    HTML_PAGE = _f.read()
 
-  body {
-    font-family: 'Cormorant Garamond', Georgia, serif;
-    background: #1a1209 url('/sfondo.png') center center / cover fixed;
-    color: var(--ink);
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  /* ── Header ── */
-  header {
-    flex-shrink: 0;
-    display: flex;
-    align-items: baseline;
-    justify-content: center;
-    gap: 16px;
-    padding: 8px 28px;
-    border-bottom: 1px solid rgba(139,105,20,0.25);
-    background: rgba(30,20,8,0.35);
-    backdrop-filter: blur(6px);
-  }
-  header h1 {
-    font-family: 'IM Fell English SC', serif;
-    font-size: 20px;
-    color: var(--gold-bright);
-    letter-spacing: 3px;
-    text-shadow: 0 1px 4px rgba(0,0,0,0.3);
-  }
-  header .sep { color: rgba(139,105,20,0.5); font-size: 14px; }
-  header .subtitle {
-    font-style: italic;
-    font-size: 13px;
-    color: #4a3a25;
-    letter-spacing: 1px;
-  }
-  .db-stats {
-    margin-left: auto;
-    display: flex;
-    gap: 14px;
-    font-size: 11px;
-    color: #4a3a25;
-  }
-  .db-stats strong { color: #3a2a18; }
-
-  /* ── Main layout ── */
-  .main {
-    flex: 1;
-    display: flex;
-    gap: 28px;
-    padding: 18px 28px 14px;
-    overflow: hidden;
-    max-width: 1500px;
-    width: 100%;
-    margin: 0 auto;
-  }
-
-  /* ── Left column: input + controls ── */
-  .col-input {
-    flex: 0 0 560px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    min-width: 0;
-  }
-
-  .input-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    background: linear-gradient(160deg, var(--parchment) 0%, #eddcb5 100%);
-    border: 2px solid var(--parchment-dark);
-    border-radius: 5px;
-    box-shadow: 0 6px 28px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.3);
-    overflow: hidden;
-  }
-  .panel-bar {
-    padding: 8px 18px;
-    background: linear-gradient(180deg, rgba(139,105,20,0.14), rgba(139,105,20,0.04));
-    border-bottom: 1px solid var(--parchment-dark);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .panel-bar h2 {
-    font-family: 'IM Fell English SC', serif;
-    font-size: 14px;
-    color: var(--ink-light);
-    letter-spacing: 2px;
-  }
-  .word-count {
-    font-size: 12px;
-    color: var(--ink-faded);
-    font-style: italic;
-  }
-  textarea {
-    flex: 1;
-    width: 100%;
-    min-height: 60px;
-    padding: 16px 20px;
-    background: transparent;
-    border: none;
-    color: var(--ink);
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 18px;
-    line-height: 1.75;
-    resize: none;
-    outline: none;
-  }
-  textarea::placeholder { color: var(--ink-faded); font-style: italic; }
-
-  /* ── Control strip ── */
-  .control-strip {
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 12px;
-    flex-wrap: wrap;
-    width: 100%;
-  }
-
-  .btn {
-    padding: 10px 30px;
-    border: 2px solid var(--gold);
-    border-radius: 4px;
-    font-family: 'IM Fell English SC', serif;
-    font-size: 15px;
-    cursor: pointer;
-    transition: all 0.2s;
-    letter-spacing: 1px;
-  }
-  .btn-primary {
-    background: linear-gradient(180deg, #8b6914, #6b4f0e);
-    color: var(--parchment);
-    text-shadow: 0 1px 2px rgba(0,0,0,0.4);
-    box-shadow: 0 3px 10px rgba(139,105,20,0.3);
-  }
-  .btn-primary:hover {
-    background: linear-gradient(180deg, #a07a1a, #8b6914);
-    box-shadow: 0 4px 18px rgba(212,175,55,0.35);
-    transform: translateY(-1px);
-  }
-  .btn-secondary {
-    background: linear-gradient(180deg, var(--parchment), #e0d0a8);
-    color: var(--ink-light);
-    border-color: var(--parchment-dark);
-    padding: 10px 22px;
-    font-size: 14px;
-  }
-  .btn-secondary:hover {
-    background: linear-gradient(180deg, #f0e0c0, var(--parchment));
-  }
-
-  .slider-group {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-  }
-  .slider-group label {
-    font-size: 15px;
-    color: var(--ink-light);
-    font-style: italic;
-    white-space: nowrap;
-  }
-  .slider-group input[type=range] {
-    flex: 1;
-    accent-color: var(--gold);
-  }
-  .slider-group .val {
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--gold);
-    min-width: 36px;
-    text-align: right;
-  }
-
-  .loading {
-    display: none;
-    align-items: center;
-    gap: 6px;
-    color: var(--gold-light);
-    font-style: italic;
-    font-size: 14px;
-  }
-  .loading.active { display: flex; }
-  .quill { display: inline-block; animation: qw .9s ease-in-out infinite; }
-  @keyframes qw { 0%,100%{transform:rotate(-5deg)} 50%{transform:rotate(12deg) translateX(2px)} }
-
-  /* ── Right column: pergamena ── */
-  .col-output {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-  }
-
-  .pergamena-frame {
-    flex: 1;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 0;
-  }
-  .pergamena-inner {
-    position: relative;
-    overflow: hidden;
-    /* Altezza fissa in vh: identica su ogni schermo/viewport */
-    height: calc(100vh - 90px);
-  }
-  .pergamena-inner img {
-    height: 100%;
-    width: auto;
-    display: block;
-    filter: drop-shadow(0 6px 18px rgba(0,0,0,0.5));
-  }
-  .output-text {
-    position: absolute;
-    top: 24%;
-    left: 18%;
-    right: 18%;
-    bottom: 20%;
-    font-family: 'Cormorant Garamond', serif;
-    font-style: italic;
-    font-size: 15px;
-    line-height: 1.45;
-    color: var(--ink);
-    text-align: center;
-    overflow-y: auto;
-    padding: 4px 6px;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(139,105,20,0.25) transparent;
-  }
-  .output-text:empty::before {
-    content: "Qui apparir\00e0  il Vostro testo, rielaborato con somma cura\2026";
-    color: var(--ink-faded);
-  }
-  .output-text:not(:empty) {
-    overflow-y: auto;
-  }
-  .output-text::-webkit-scrollbar { width: 3px; }
-  .output-text::-webkit-scrollbar-thumb { background: rgba(139,105,20,0.25); border-radius: 2px; }
-
-  /* ── Token ── */
-  .token-replaced {
-    color: inherit;
-    font-weight: inherit;
-  }
-
-  /* ── Stats bar under pergamena ── */
-  .stats-row {
-    display: none;
-    align-items: center;
-    justify-content: center;
-    gap: 14px;
-    flex-shrink: 0;
-    flex-wrap: wrap;
-  }
-  .stats-row span {
-    font-size: 13px;
-    color: var(--ink-light);
-    font-style: italic;
-  }
-  .stats-row strong { color: var(--ink); }
-  .stat-hl { color: var(--gold) !important; font-weight: 700; }
-
-  .btn-copy {
-    font-family: 'IM Fell English SC', serif;
-    font-size: 12px;
-    padding: 4px 14px;
-    border-radius: 3px;
-    background: linear-gradient(180deg, var(--parchment), #e0d0a8);
-    color: var(--ink-light);
-    border: 1px solid var(--parchment-dark);
-    cursor: pointer;
-    letter-spacing: 1px;
-    transition: background 0.2s;
-  }
-  .btn-copy:hover { background: linear-gradient(180deg, #f5edd5, var(--parchment)); }
-
-  /* ── Responsive ── */
-  @media (max-width: 900px) {
-    body { overflow: auto; height: auto; min-height: 100vh; }
-    .main { flex-direction: column; padding: 12px 16px; gap: 16px; overflow: visible; }
-    .col-input { flex: none; width: 100%; }
-    .col-output { flex: none; width: 100%; }
-    .pergamena-frame { height: auto; }
-    .pergamena-inner { height: auto !important; width: 70vw; max-width: 360px; margin: 0 auto; }
-    .pergamena-inner img { width: 100% !important; height: auto !important; }
-    .input-panel { min-height: 200px; }
-    header { flex-wrap: wrap; }
-  }
-</style>
-</head>
-<body>
-
-<header>
-  <h1>Il Sinonimizzatore</h1>
-  <span class="sep">&mdash;</span>
-  <span class="subtitle">Macchina per la Rielaborazione delle Parole</span>
-  <div class="db-stats">
-    <span><strong id="dbLemmas">--</strong> lemmi</span>
-    <span><strong id="dbForms">--</strong> forme</span>
-    <span><strong id="dbSynonyms">--</strong> sinonimi</span>
-  </div>
-</header>
-
-<div class="main">
-
-  <!-- INPUT -->
-  <div class="col-input">
-    <div class="input-panel">
-      <div class="panel-bar">
-        <h2>Testo Originale</h2>
-        <span class="word-count" id="inputCount">0 parole</span>
-      </div>
-      <textarea id="inputText" placeholder="Vergare qui il testo che si desidera rielaborare..." spellcheck="false"></textarea>
-    </div>
-
-    <div class="slider-group">
-      <label>Intensit&agrave;</label>
-      <input type="range" id="intensity" min="10" max="100" value="70" step="5">
-      <span class="val" id="intensityVal">70%</span>
-    </div>
-
-    <div class="control-strip">
-      <button class="btn btn-primary" id="btnSinonimizza" onclick="sinonimizza()">Sinonimizza</button>
-      <button class="btn btn-secondary" onclick="reSinonimizza()">Rigenera</button>
-      <div class="loading" id="loading">
-        <span class="quill">&#9998;</span>
-        <span>Lo scriba lavora&hellip;</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- OUTPUT -->
-  <div class="col-output">
-    <div class="pergamena-frame">
-      <div class="pergamena-inner">
-        <img src="/pergamena.png?v=5" alt="">
-        <div class="output-text" id="outputText"></div>
-      </div>
-    </div>
-    <div class="stats-row" id="statsBar">
-      <span>Parole <strong id="statTotal">0</strong></span>
-      <span>Sostituite <strong class="stat-hl" id="statReplaced">0</strong></span>
-      <span>(<strong class="stat-hl" id="statPct">0%</strong>)</span>
-      <button class="btn-copy" onclick="copyOutput()">Copia</button>
-    </div>
-  </div>
-
-</div>
-
-<script>
-let currentTokens=[], currentSeed=null;
-const sl=document.getElementById('intensity'), sv=document.getElementById('intensityVal');
-sl.addEventListener('input',()=>{sv.textContent=sl.value+'%'});
-
-document.getElementById('inputText').addEventListener('input',function(){
-  const w=this.value.trim().split(/\s+/).filter(w=>w.length>0);
-  document.getElementById('inputCount').textContent=w.length+' parole';
-});
-document.getElementById('inputText').addEventListener('keydown',function(e){
-  if(e.ctrlKey&&e.key==='Enter') sinonimizza();
-});
-
-async function sinonimizza(){
-  const t=document.getElementById('inputText').value.trim();
-  if(!t) return;
-  currentSeed=Math.floor(Math.random()*1e6);
-  await doRequest(t,currentSeed);
-}
-async function reSinonimizza(){
-  const t=document.getElementById('inputText').value.trim();
-  if(!t) return;
-  currentSeed=Math.floor(Math.random()*1e6);
-  await doRequest(t,currentSeed);
-}
-
-async function doRequest(text,seed){
-  const btn=document.getElementById('btnSinonimizza'), ld=document.getElementById('loading');
-  btn.disabled=true; ld.classList.add('active');
-  try{
-    const r=await fetch('/api/sinonimizza',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text,intensity:parseInt(sl.value),seed})});
-    currentTokens=(await r.json()).tokens;
-    renderOutput();
-  }catch(e){document.getElementById('outputText').textContent='Errore: '+e.message}
-  btn.disabled=false; ld.classList.remove('active');
-}
-
-function renderOutput(){
-  const c=document.getElementById('outputText');
-  c.innerHTML='';
-  let tw=0, rw=0;
-  currentTokens.forEach(t=>{
-    if(/^[a-zA-Z\u00C0-\u024F']+$/.test(t.original)) tw++;
-    if(t.replaced){
-      rw++;
-      const s=document.createElement('span');
-      s.className='token-replaced';
-      s.textContent=t.replacement;
-      s.title=t.original+' \u2192 '+t.replacement;
-      c.appendChild(s);
-    } else c.appendChild(document.createTextNode(t.replacement));
-  });
-  document.getElementById('statTotal').textContent=tw;
-  document.getElementById('statReplaced').textContent=rw;
-  document.getElementById('statPct').textContent=tw>0?Math.round(100*rw/tw)+'%':'0%';
-  document.getElementById('statsBar').style.display='flex';
-}
-
-function copyOutput(){
-  navigator.clipboard.writeText(currentTokens.map(t=>t.replacement).join('')).then(()=>{
-    const b=document.querySelector('.btn-copy'), o=b.textContent;
-    b.textContent='Copiato!'; setTimeout(()=>b.textContent=o,1500);
-  });
-}
-
-fetch('/api/stats').then(r=>r.json()).then(d=>{
-  document.getElementById('dbLemmas').textContent=d.lemmas?.toLocaleString('it-IT')||'--';
-  document.getElementById('dbForms').textContent=d.forms?.toLocaleString('it-IT')||'--';
-  document.getElementById('dbSynonyms').textContent=d.synonyms?.toLocaleString('it-IT')||'--';
-});
-</script>
-</body>
-</html>"""
 
 
 # ─── HTTP Server ──────────────────────────────────────────────────────────────
@@ -1396,7 +1525,7 @@ def main():
     print(f"  DB: {stats['lemmas']:,} lemmi | {stats['forms']:,} forme | {stats['synonyms']:,} sinonimi")
 
     host = os.environ.get("HOST", "127.0.0.1")  # Cloud Run richiede 0.0.0.0
-    server = http.server.HTTPServer((host, args.port), SinonimizzatoreHandler)
+    server = http.server.ThreadingHTTPServer((host, args.port), SinonimizzatoreHandler)
     print(f"\n  Apri: http://localhost:{args.port}")
     print("  Premi Ctrl+C per chiudere.\n")
 

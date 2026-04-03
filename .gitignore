@@ -20,3 +20,11 @@ morphit_synonyms_state.json
 morphit_synonyms.log
 pergamena.jpg
 screenshot.png
+# Dump e file temporanei
+itwiktionary-dump.xml.bz2
+morphit.db.bak
+morphit.db-shm
+morphit.db-wal
+*_dry_run.txt
+pergamena - Copia.jpg
+Sinonimizzatore-old/
